@@ -1096,8 +1096,17 @@
         <div style="margin-bottom:14px">
           <div style="display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:4px">
             <h3 class="submit-page-title" style="margin:0">Client Order List</h3>
-            <button type="button" class="btn primary" id="btnGotoCreateOrder">+ Create an order</button>
-            <button type="button" class="btn" id="btnGotoPlatformSubmit" title="Gx-Portal 방식: Order ID만 입력, daemon이 Platform API에서 상세 정보 fetch">⬆ From Platform</button>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+              <select id="gxSchemaServiceSelect" title="Service for field JSON export" style="max-width:200px">
+                <option value="carrier_screening">Carrier screening</option>
+                <option value="whole_exome">Whole exome</option>
+                <option value="health_screening">Health screening</option>
+                <option value="sgnipt">Single-gene NIPT</option>
+              </select>
+              <button type="button" class="btn" id="btnDownloadOrderSchema" title="Download Create Order fields as GX Portal import JSON">Download field JSON</button>
+              <button type="button" class="btn primary" id="btnGotoCreateOrder">+ Create an order</button>
+              <button type="button" class="btn" id="btnGotoPlatformSubmit" title="Gx-Portal 방식: Order ID만 입력, daemon이 Platform API에서 상세 정보 fetch">⬆ From Platform</button>
+            </div>
           </div>
           <p class="submit-page-sub">Orders on this daemon. <strong>Save</strong> stores a draft (<strong>SAVED</strong>) without starting the pipeline. Use <strong>⋯ → Submit</strong> to queue a first run. <strong>Stop</strong> removes a draft, cancels queued, or stops a running job. <strong>⋯ → Delete</strong> removes the order from the daemon and deletes <code>analysis</code>, <code>output</code>, and <code>log</code> for that run (FASTQ is kept; stop a running job first). <strong>⋯ → Force Run</strong> (Carrier &amp; sgNIPT) queues the full pipeline reusing Nextflow cache (<code>-resume</code>). <strong>Force Run (Fresh)</strong> (Carrier &amp; sgNIPT) deletes <code>work/</code> + <code>.nextflow</code> cache and reruns completely from scratch (<code>--fresh</code>). Carrier &amp; sgNIPT optional: <strong>Reprocess only</strong> refreshes <code>result.json</code> from existing pipeline output without re-running the pipeline (Carrier: re-annotates VCFs; sgNIPT: re-copies result JSON).</p>
         </div>
@@ -1220,6 +1229,9 @@
             </select>
             <p id="fServiceHint" class="muted" style="font-size:11px;margin:8px 0 0;line-height:1.45">Carrier screening annotates the full exome/capture; choose a <strong>Primary</strong> panel for interpretation/report scope. Extended services use a separate program list.</p>
             <p id="fServiceHintWes" class="muted hidden" style="font-size:11px;margin:8px 0 0;line-height:1.45">Same gx-exome sequencing pipeline for both. <strong>Whole exome:</strong> Primary (interpretation) is optional. <strong>Health screening:</strong> Primary (interpretation) is required before you submit the run.</p>
+            <div style="margin-top:12px">
+              <button type="button" class="btn" id="btnDownloadOrderSchemaCreate" title="Download this service's Create Order fields as GX Portal import JSON">Download field JSON</button>
+            </div>
             <div id="cr_extended_program_wrap" class="hidden" style="margin-top:14px">
               <label for="cr_extended_program">Primary</label>
               <select id="cr_extended_program" style="width:100%;max-width:100%;box-sizing:border-box;margin-top:6px">
@@ -6426,6 +6438,188 @@
       return (gx && typeof gx === 'object') ? gx : null;
     }
 
+    const GX_SCHEMA_VERSION = '2026-09-19';
+    const GX_SCHEMA_SERVICE_CODES = {
+      carrier_screening: 'CARRIER',
+      whole_exome: 'WHOLE_EXOME',
+      health_screening: 'HEALTH_SCREENING',
+      sgnipt: 'SGNIPT',
+    };
+
+    function gxSchemaEnumToken(v) {
+      return String(v || '')
+        .trim()
+        .toUpperCase()
+        .replace(/[,\s-]+/g, '_')
+        .replace(/_+/g, '_');
+    }
+
+    function gxSchemaField(key, label, ftype, order, required, extra) {
+      const e = extra || {};
+      return {
+        fieldKey: key,
+        fieldLabel: label,
+        fieldType: ftype,
+        isRequired: !!required,
+        order,
+        defaultValue: e.defaultValue != null ? e.defaultValue : null,
+        validation: e.validation || null,
+        enumValues: e.enumValues || [],
+        enumLabels: e.enumLabels || [],
+      };
+    }
+
+    /** Read non-empty <select> options; GX enumValues are UPPERCASE. */
+    function gxSchemaEnumsFromSelect(selectId) {
+      const el = qs(selectId);
+      const enumValues = [];
+      const enumLabels = [];
+      if (!el) return { enumValues, enumLabels };
+      Array.from(el.options).forEach(opt => {
+        const raw = String(opt.value || '').trim();
+        if (!raw) return;
+        const token = gxSchemaEnumToken(raw);
+        if (!token || enumValues.includes(token)) return;
+        enumValues.push(token);
+        enumLabels.push(String(opt.textContent || raw).replace(/\s+/g, ' ').trim() || token);
+      });
+      return { enumValues, enumLabels };
+    }
+
+    function gxSchemaDefaultFromSelect(selectId) {
+      const el = qs(selectId);
+      if (!el) return null;
+      const raw = String(el.value || '').trim();
+      return raw ? gxSchemaEnumToken(raw) : null;
+    }
+
+    function gxSchemaWesPanelField(order, required) {
+      const enums = gxSchemaEnumsFromSelect('cr_wes_panel');
+      if (enums.enumValues.length) {
+        return gxSchemaField('wesPanelId', 'Primary (interpretation) panel', 'enum', order, required, enums);
+      }
+      return gxSchemaField('wesPanelId', 'Primary (interpretation) panel', 'string', order, required, {
+        validation: { maxLength: 80 },
+      });
+    }
+
+    function buildGxExomeOrderFields(service) {
+      const gender = gxSchemaEnumsFromSelect('cr_patient_gender');
+      const yn = gxSchemaEnumsFromSelect('cr_affected');
+      const lang = gxSchemaEnumsFromSelect('cr_report_lang');
+      const reportType = gxSchemaEnumsFromSelect('cr_report_type');
+      const specimen = gxSchemaEnumsFromSelect('cr_specimen');
+      const fields = [
+        gxSchemaField('patientName', 'Patient Name', 'string', 1, true, { validation: { maxLength: 80 } }),
+        gxSchemaField('patientBirth', 'Date of Birth', 'date', 2, true),
+        gxSchemaField('patientGender', 'Gender', 'enum', 3, true, gender),
+        gxSchemaField('affected', 'Affected', 'enum', 4, true, yn),
+        gxSchemaField('clinicalInformation', 'Clinical information', 'string', 5, false, { validation: { maxLength: 4000 } }),
+        gxSchemaWesPanelField(6, service !== 'whole_exome'),
+        gxSchemaField('reportLanguage', 'Report Language', 'enum', 7, true, lang),
+        gxSchemaField('reportType', 'Report Type', 'enum', 8, true, reportType),
+        gxSchemaField('sampleSpecimenType', 'Sample Specimen Type', 'enum', 9, false, {
+          ...specimen,
+          defaultValue: gxSchemaDefaultFromSelect('cr_specimen') || 'BLOOD',
+        }),
+        gxSchemaField('receiptDate', 'Receipt Date', 'date', 10, false),
+        gxSchemaField('sampleBarcode', 'Sample Barcode', 'string', 11, false, { validation: { maxLength: 80 } }),
+        gxSchemaField('includePgx', 'Include PGx on customer PDF', 'boolean', 12, false, { defaultValue: true }),
+        gxSchemaField('includeApoePgx', 'APOE genotype tag SNPs', 'boolean', 13, false, { defaultValue: false }),
+      ];
+      if (service === 'carrier_screening') {
+        fields.push(
+          gxSchemaField('reportMode', 'Carrier report mode', 'enum', 14, false, {
+            enumValues: ['SINGLE', 'COUPLES'],
+            enumLabels: ['Single report', 'Couples report'],
+            defaultValue: 'SINGLE',
+          }),
+          gxSchemaField('partnerOrderId', 'Partner Order ID', 'string', 15, false, { validation: { maxLength: 64 } })
+        );
+      }
+      return fields;
+    }
+
+    function buildGxSgniptOrderFields() {
+      return [
+        gxSchemaField('patientName', 'Patient Name', 'string', 1, true, { validation: { maxLength: 80 } }),
+        gxSchemaField('patientBirth', 'Date of Birth', 'date', 2, true),
+        gxSchemaField('patientGender', 'Gender', 'enum', 3, true, {
+          ...gxSchemaEnumsFromSelect('sg_patient_gender'),
+          defaultValue: 'FEMALE',
+        }),
+        gxSchemaField('gestationalAgeWeeks', 'GA Weeks', 'number', 4, true, { validation: { min: 0, max: 45 } }),
+        gxSchemaField('gestationalAgeDays', 'GA Days', 'number', 5, true, { validation: { min: 0, max: 6 } }),
+        gxSchemaField('pregnancyType', 'Pregnancy Type', 'enum', 6, true, gxSchemaEnumsFromSelect('sg_pregnancy_type')),
+        gxSchemaField('estimatedDeliveryDate', 'Estimated Delivery Date', 'date', 7, true),
+        gxSchemaField('height', 'Height (cm)', 'number', 8, false, { validation: { min: 0, max: 300 } }),
+        gxSchemaField('weight', 'Weight (kg)', 'number', 9, false, { validation: { min: 0, max: 300 } }),
+        gxSchemaField('packageCode', 'Package Code', 'enum', 10, true, gxSchemaEnumsFromSelect('sg_package')),
+        gxSchemaField('reportLanguage', 'Report Language', 'enum', 11, true, gxSchemaEnumsFromSelect('sg_report_lang')),
+        gxSchemaField('reportType', 'Report Type', 'enum', 12, true, gxSchemaEnumsFromSelect('sg_report_type')),
+        gxSchemaField('indication', 'Indication for Testing', 'enum', 13, false, gxSchemaEnumsFromSelect('sg_indication')),
+        gxSchemaField('sampleSpecimenType', 'Sample Specimen Type', 'enum', 14, false, {
+          ...gxSchemaEnumsFromSelect('sg_specimen'),
+          defaultValue: gxSchemaDefaultFromSelect('sg_specimen') || 'BLOOD',
+        }),
+        gxSchemaField('receiptDate', 'Receipt Date', 'date', 15, false),
+        gxSchemaField('measurementMethod', 'Measurement Method', 'enum', 16, false, {
+          ...gxSchemaEnumsFromSelect('sg_measure_method'),
+          defaultValue: gxSchemaDefaultFromSelect('sg_measure_method') || 'LMP',
+        }),
+        gxSchemaField('sampleBarcode', 'Sample Barcode', 'string', 17, false, { validation: { maxLength: 80 } }),
+        gxSchemaField('category', 'Category', 'enum', 18, false, {
+          ...gxSchemaEnumsFromSelect('sg_category'),
+          defaultValue: gxSchemaDefaultFromSelect('sg_category') || 'DOMESTIC',
+        }),
+        gxSchemaField('previousOrderId', 'Previous Order', 'string', 19, false, { validation: { maxLength: 64 } }),
+        gxSchemaField('niptKitId', 'NIPT Kit ID', 'string', 20, false, { validation: { maxLength: 80 } }),
+        gxSchemaField('sequencingBatchId', 'Sequencing Batch ID', 'string', 21, false, { validation: { maxLength: 80 } }),
+        gxSchemaField('controlSample', 'Control Sample', 'enum', 22, true, {
+          ...gxSchemaEnumsFromSelect('sg_control'),
+          defaultValue: gxSchemaDefaultFromSelect('sg_control') || 'NO',
+        }),
+        gxSchemaField('trfConsent', 'TRF Consent', 'enum', 23, true, {
+          ...gxSchemaEnumsFromSelect('sg_trf'),
+          defaultValue: gxSchemaDefaultFromSelect('sg_trf') || 'YES',
+        }),
+        gxSchemaField('showFetalGender', 'Show Fetal Gender', 'enum', 24, true, {
+          ...gxSchemaEnumsFromSelect('sg_fetal_gender'),
+          defaultValue: gxSchemaDefaultFromSelect('sg_fetal_gender') || 'YES',
+        }),
+        gxSchemaField('resample', 'Resample', 'enum', 25, true, {
+          ...gxSchemaEnumsFromSelect('sg_resample'),
+          defaultValue: gxSchemaDefaultFromSelect('sg_resample') || 'NO',
+        }),
+      ];
+    }
+
+    function buildGxOrderSchema(service) {
+      const gxCode = GX_SCHEMA_SERVICE_CODES[service];
+      if (!gxCode) return null;
+      const fields = service === 'sgnipt' ? buildGxSgniptOrderFields() : buildGxExomeOrderFields(service);
+      return {
+        service_code: gxCode,
+        version: GX_SCHEMA_VERSION,
+        fields,
+      };
+    }
+
+    function downloadGxOrderSchema(service) {
+      const schema = buildGxOrderSchema(service);
+      if (!schema) {
+        toast('Choose Carrier, Whole exome, Health screening, or Single-gene NIPT', false);
+        return;
+      }
+      const blob = new Blob([JSON.stringify(schema, null, 2)], { type: 'application/json;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `gx-order-schema-${schema.service_code}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast(`Downloaded ${a.download}`);
+    }
+
     function orderTypePillHtml(o) {
       const sc = o.service_code || '';
       const inner = _orderTypePillInnerHtml(o, sc);
@@ -7485,6 +7679,15 @@
     const btnExport = qs('btnExportOrdersTsv');
     if (btnExport) btnExport.onclick = exportOrdersTsv;
     if (qs('btnGotoCreateOrder')) qs('btnGotoCreateOrder').onclick = () => showCreateOrderPanel();
+    if (qs('btnDownloadOrderSchema')) {
+      qs('btnDownloadOrderSchema').onclick = () => {
+        const sel = qs('gxSchemaServiceSelect');
+        downloadGxOrderSchema(sel && sel.value ? sel.value : 'carrier_screening');
+      };
+    }
+    if (qs('btnDownloadOrderSchemaCreate')) {
+      qs('btnDownloadOrderSchemaCreate').onclick = () => downloadGxOrderSchema(getFServiceValue());
+    }
     if (qs('btnBackFromCreate')) qs('btnBackFromCreate').onclick = () => showOrdersListOnly();
     if (qs('btnCancelCreate')) qs('btnCancelCreate').onclick = () => showOrdersListOnly();
     if (qs('btnGotoPlatformSubmit')) qs('btnGotoPlatformSubmit').onclick = () => showPlatformSubmitPanel();

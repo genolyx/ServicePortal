@@ -25,23 +25,7 @@ python3 -m http.server 8080
 
 ## GX Portal 연동
 
-ServicePortal + gx-daemon이 문서의 **외부 Portal**(분석·리뷰·PDF) 역할입니다.
-
-GX가 호출하는 API는 **gx-daemon**에 있습니다.
-
-| 메서드 | 경로 | 역할 |
-|---|---|---|
-| `GET` | `/v1/order-schema?service_code=CARRIER` | 오더 필드 스키마 |
-| `POST` | `/v1/orders` | GX `order_id`로 주문 생성, FASTQ URL 즉시 다운로드 후 파이프라인 시작 |
-| `POST` | `/v1/orders/{order_id}/send-report` | ServicePortal Send — 최신 `Report_*.pdf`를 `callback.report_url`로 전송 |
-
-인증: `Authorization: Bearer {GX_EXTERNAL_API_KEY 또는 API_KEY}`
-
-GX로 PDF를 보낼 때: daemon `.env`에 `GX_CALLBACK_API_KEY` (GX가 발급한 inbound 키)
-
-오더 리스트에 **GX** 뱃지가 보이면 ⋯ 메뉴에서 **Send to GX Portal**을 사용합니다.
-
-지원 `service_code`: `CARRIER`, `WHOLE_EXOME`, `HEALTH_SCREENING`, `SGNIPT`
+GX inbound API는 **gx-portal** NestJS (`/api/v1/...`)에 있습니다. gx-daemon은 분석 파이프라인만 담당합니다.
 
 ## 데몬 연결
 
