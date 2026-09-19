@@ -203,11 +203,13 @@
     .pill.type-couples{background:rgba(139,92,246,.18);border-color:rgba(139,92,246,.5);color:#ddd6fe}
     .pill.type-other-test{background:rgba(245,158,11,.15);border-color:rgba(245,158,11,.5);color:var(--pill-warn-tx)}
     .pill.type-sgnipt{background:rgba(34,197,94,.18);border-color:rgba(34,197,94,.45);color:var(--pill-done-tx)}
+    .pill.type-gx{background:rgba(168,85,247,.16);border-color:rgba(168,85,247,.5);color:#d8b4fe;margin-left:6px}
     .pill.type-nipt{background:rgba(99,102,241,.15);border-color:rgba(99,102,241,.45);color:var(--pill-new-tx)}
     body.light .pill.type-carrier{background:rgba(37,99,235,.1);border-color:rgba(37,99,235,.4);color:#1d4ed8}
     body.light .pill.type-couples{background:rgba(139,92,246,.12);border-color:rgba(139,92,246,.4);color:#6d28d9}
     body.light .pill.type-other-test{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.45);color:#b45309}
     body.light .pill.type-sgnipt{background:rgba(22,163,74,.12);border-color:rgba(22,163,74,.4);color:#15803d}
+    body.light .pill.type-gx{background:rgba(126,34,206,.1);border-color:rgba(126,34,206,.4);color:#7e22ce}
     body.light .pill.type-nipt{background:rgba(99,102,241,.12);border-color:rgba(99,102,241,.4);color:#4338ca}
     .pill.warn{background:var(--pill-warn-bg);border-color:var(--pill-warn-bd);color:var(--pill-warn-tx)}
     .pill.err{background:var(--pill-err-bg);border-color:var(--pill-err-bd);color:var(--pill-err-tx)}
@@ -6419,9 +6421,16 @@
       return `<span class="pill" style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.45);color:#ffb4b4;margin-right:4px" title="${escapeAttr(title)}">⚠ this daemon</span>`;
     }
 
+    function gxPortalMeta(o) {
+      const gx = o && o.params && o.params._gx;
+      return (gx && typeof gx === 'object') ? gx : null;
+    }
+
     function orderTypePillHtml(o) {
       const sc = o.service_code || '';
-      return _orderTypePillInnerHtml(o, sc);
+      const inner = _orderTypePillInnerHtml(o, sc);
+      if (!gxPortalMeta(o)) return inner;
+      return inner + '<span class="pill type-gx" title="Submitted from GX Portal">GX</span>';
     }
 
     function _orderTypePillInnerHtml(o, sc) {
@@ -6451,6 +6460,28 @@
         loadOrders();
       } catch (e) {
         toast(e.message || 'Submit failed', false);
+      }
+    }
+
+    async function sendGxPortalReport(o) {
+      closeAllMoreMenus();
+      const oid = o && o.order_id != null ? String(o.order_id).trim() : '';
+      const gx = gxPortalMeta(o);
+      if (!oid || !gx || !gx.report_url) {
+        toast('This order has no GX Portal callback', false);
+        return;
+      }
+      const { ok } = await openConfirmModal({
+        title: 'Send report to GX Portal?',
+        message: `Upload the latest Report_*.pdf for "${oid}" to GX Portal.\n\nThis calls the stored callback.report_url (GX then marks the order Report Ready).`,
+        okText: 'Send PDF',
+      });
+      if (!ok) return;
+      try {
+        const res = await apiPost(`/v1/orders/${encodeURIComponent(oid)}/send-report`, {});
+        toast(res.status ? `GX: ${res.status}` : 'Report sent to GX Portal', true);
+      } catch (e) {
+        toast(e.message || 'GX send failed', false);
       }
     }
 
@@ -6942,6 +6973,10 @@
         html += `<div class="order-detail-actions"><button type="button" class="btn" id="btnOrderDetailFollowUp">New order from this…</button>` +
           `<p class="order-detail-actions-text">Copies clinical fields and <strong>FASTQ / BAM paths</strong> into a <strong>new</strong> draft. Enter a new Order ID, edit if needed, then Save and Submit.</p></div>`;
       }
+      if (gxPortalMeta(o) && gxPortalMeta(o).report_url && (stDetail === 'REPORT_READY' || stDetail === 'COMPLETED')) {
+        html += `<div class="order-detail-actions"><button type="button" class="btn primary" id="btnOrderDetailGxSend">Send report to GX Portal</button>` +
+          `<p class="order-detail-actions-text">GX order — POST the latest <code>Report_*.pdf</code> to the stored <code>callback.report_url</code>.</p></div>`;
+      }
       const canEditDetail = stDetail === 'SAVED' && ['carrier_screening', 'whole_exome', 'health_screening', 'sgnipt'].includes(o.service_code);
       if (canEditDetail) {
         html += `<div class="order-detail-actions"><button type="button" class="btn primary" id="btnOrderDetailEdit">Edit order</button>` +
@@ -7081,6 +7116,8 @@
       if (orderStatusUpper(o) === 'REPORT_READY') appendOrderDetailReportFiles(o.order_id);
       const btnFu = qs('btnOrderDetailFollowUp');
       if (btnFu) btnFu.onclick = () => { void startFollowUpOrderFrom(o); };
+      const btnGx = qs('btnOrderDetailGxSend');
+      if (btnGx) btnGx.onclick = () => { void sendGxPortalReport(o); };
       const btnEd = qs('btnOrderDetailEdit');
       if (btnEd) btnEd.onclick = () => { void openEditOrder(o); };
       setupOrderPipelineLogPanel(o);
@@ -7277,6 +7314,9 @@
           items.push('<button type="button" data-act="review">Review</button>');
           items.push('<button type="button" data-act="new-from" title="New draft with copied clinical fields and FASTQ/BAM paths; enter a new Order ID">New order from this…</button>');
         }
+        if (gxPortalMeta(o) && gxPortalMeta(o).report_url && (st === 'REPORT_READY' || st === 'COMPLETED')) {
+          items.push('<button type="button" data-act="gx-send" title="POST the latest Report_*.pdf to GX Portal callback.report_url">Send to GX Portal</button>');
+        }
         if (
           ['carrier_screening', 'whole_exome', 'health_screening', 'sgnipt'].includes(o.service_code)
           && ['COMPLETED', 'REPORT_READY', 'FAILED', 'CANCELLED'].includes(st)
@@ -7384,6 +7424,7 @@
               mbtn.setAttribute('aria-expanded', 'false');
               const act = b.getAttribute('data-act');
               if (act === 'edit') void openEditOrder(o);
+              else if (act === 'gx-send') void sendGxPortalReport(o);
               else if (act === 'new-from') void startFollowUpOrderFrom(o);
               else if (act === 'submit') startSavedOrder(o.order_id, o.service_code);
               else if (act === 'force-run') forceRunOrderRow(o);
